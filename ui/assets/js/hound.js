@@ -232,6 +232,129 @@ var Model = {
     });
   },
 
+  DocSearch: function(params) {
+    this.willSearch.raise(this, params);
+
+    var _this = this,
+        startedAt = Date.now();
+
+    params = $.extend({
+      stats: 'fosho',
+      repos: '*',
+      rng: ':20'
+    }, params);
+
+    // todo: should update state to get UI feedback
+    params.files = "\\.md";
+
+    if (params.repos === '') {
+      params.repos = '*';
+    }
+
+    _this.params = params;
+    
+    // todo: what to do if the user puts regex in the field
+    var paramsH1 = $.extend($.extend({}, params), {
+      q: "^#\\s+.*" + params.q + ".*"
+    });
+    var paramsH2 = $.extend($.extend({}, params), {
+      q: "^##\\s+.*" + params.q + ".*"
+    });
+    var paramsH3 = $.extend($.extend({}, params), {
+      q: "^###\\s+.*" + params.q + ".*"
+    });
+    var paramsNonH = $.extend($.extend({}, params), {
+      q: "^[^#]+\s+.*" + params.q + ".*"
+    });
+
+    console.log(paramsH1, paramsH2, paramsH3);
+
+    // An empty query is basically useless, so rather than
+    // sending it to the server and having the server do work
+    // to produce an error, we simply return empty results
+    // immediately in the client.
+    if (params.q == '') {
+      _this.results = [];
+      _this.resultsByRepo = {};
+      _this.didSearch.raise(_this, _this.Results);
+      return;
+    }
+
+    var createApiCall = (params) => $.ajax({
+      url: 'api/v1/search',
+      data: params,
+      type: 'GET',
+      dataType: 'json'
+    });
+
+    $.when(createApiCall(paramsH1), createApiCall(paramsH2), createApiCall(paramsH3), createApiCall(paramsNonH))
+      .then((h1, h2, h3, nonh) => {
+        console.log(h1, h2, h3, nonh);
+
+        var res = [h1, h2, h3, nonh];
+        var accum = {};
+        var stats = {FilesOpened: 0};
+        
+        res.forEach(arr => {
+          // todo: show actual number of files
+           if(stats.FilesOpened < arr[0].Stats.FilesOpened) {
+               stats = arr[0].Stats; 
+            }
+
+            var repos = arr[0].Results;
+            for(var k in repos) {
+              if(accum[k]) {
+                accum[k].Matches = accum[k].Matches.concat(repos[k].Matches);
+              } else {
+                accum[k] = repos[k];
+              }
+            }
+        });  
+
+        console.log(accum, stats);  
+
+        var matches = accum,
+            stats = stats,
+            results = [];
+        for (var repo in matches) {
+          if (!matches[repo]) {
+            continue;
+          }
+
+          var res = matches[repo];
+          results.push({
+            Repo: repo,
+            Rev: res.Revision,
+            Matches: res.Matches,
+            FilesWithMatch: res.FilesWithMatch,
+          });
+        }
+
+        results.sort(function(a, b) {
+          return b.Matches.length - a.Matches.length || a.Repo.localeCompare(b.Repo);
+        });
+
+        var byRepo = {};
+        results.forEach(function(res) {
+          byRepo[res.Repo] = res;
+        });
+
+        _this.results = results;
+        _this.resultsByRepo = byRepo;
+        _this.stats = {
+          Server: stats.Duration,
+          Total: Date.now() - startedAt,
+          Files: stats.FilesOpened
+        };
+
+        _this.didSearch.raise(_this, _this.results, _this.stats);
+
+         
+
+      })
+      .fail((e1, e2) => {});
+  },
+
   LoadMore: function(repo) {
     var _this = this,
         results = this.resultsByRepo[repo],
@@ -433,6 +556,9 @@ var SearchBar = React.createClass({
 
     q.focus();
   },
+  isDocSearch: function() {
+    return this.refs.dsearch.getDOMNode().checked;
+  },
   render: function() {
     var repoCount = this.state.allRepos.length,
         repoOptions = [],
@@ -499,6 +625,12 @@ var SearchBar = React.createClass({
               <label htmlFor="ignore-case">Ignore Case</label>
               <div className="field-input">
                 <input id="ignore-case" type="checkbox" ref="icase" />
+              </div>
+            </div>
+            <div className="field">
+              <label htmlFor="doc-search">Documentation Search</label>
+              <div className="field-input">
+                <input id="doc-search" type="checkbox" ref="dsearch" />
               </div>
             </div>
             <div className="field">
@@ -771,6 +903,12 @@ var App = React.createClass({
     });
 
     Model.didSearch.tap(function(model, results, stats) {
+      
+      console.log({
+        stats: stats,
+        repos: repos,
+      });
+
       _this.refs.searchBar.setState({
         stats: stats,
         repos: repos,
@@ -806,7 +944,12 @@ var App = React.createClass({
   },
   onSearchRequested: function(params) {
     this.updateHistory(params);
-    Model.Search(this.refs.searchBar.getParams());
+    
+    if(this.refs.searchBar.isDocSearch()) {
+      Model.DocSearch(this.refs.searchBar.getParams());
+    } else {
+      Model.Search(this.refs.searchBar.getParams());
+    }  
   },
   updateHistory: function(params) {
     var path = location.pathname +
